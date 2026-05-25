@@ -33,10 +33,10 @@ def get_subtitles():
 
     audio_filename = f"{video_id}.webm"
     
-    try:
+   try:
         # [과정 1] 유튜브에서 소리만 다운로드
         ydl_opts = {
-            'format': 'm4a/bestaudio/best',
+            'format': 'bestaudio[ext=webm]/bestaudio',
             'outtmpl': audio_filename,
             'quiet': True
         }
