@@ -83,7 +83,7 @@
             player = new YT.Player('player', {
                 height: '360',
                 width: '640',
-                videoId: '', 
+                videoId: '',
                 events: { 'onStateChange': onPlayerStateChange }
             });
         }
@@ -91,28 +91,37 @@
         async function loadVideo() {
             const url = document.getElementById('youtube-url').value;
             const videoId = extractVideoID(url);
-            
+
             if (!videoId) {
                 alert("올바른 유튜브 URL을 입력해주세요.");
                 return;
             }
-            
+
             player.loadVideoById(videoId);
             const box = document.getElementById('subtitles-box');
             box.innerHTML = '<div style="text-align:center; padding:50px; color:#a4b0be;">자막을 마법처럼 가져오는 중입니다... 🧙‍♂️✨</div>';
-            
+
             try {
                 const response = await fetch(`/api/subtitles?video_id=${videoId}`);
-                const data = await response.json();
-                
-                // 💡 핵심: 앵무새 에러를 지우고, 서버가 던진 '진짜 에러'를 화면에 그대로 띄웁니다!
-                if (!response.ok) throw new Error(data.error || '자막을 불러오는데 실패했습니다.');
-                if (data.error) throw new Error(data.error);
-                
+                const text = await response.text();
+
+                let data;
+                try {
+                    data = JSON.parse(text);
+                } catch (parseErr) {
+                    // JSON 파싱 자체가 실패 → 서버가 뭘 보냈는지 그대로 표시
+                    box.innerHTML = `<div style="text-align:center; padding:50px; color:#ff4757;">
+                        서버 응답 파싱 실패<br><br>
+                        <pre style="text-align:left; font-size:11px; color:#aaa; white-space:pre-wrap; overflow:auto;">${text.substring(0, 500)}</pre>
+                    </div>`;
+                    return;
+                }
+
+                if (!response.ok || data.error) throw new Error(data.error || '자막 불러오기 실패');
+
                 subtitlesData = data;
                 renderSubtitles();
             } catch (e) {
-                // 화면에 진짜 에러 원인이 빨간 글씨로 뜹니다.
                 box.innerHTML = `<div style="text-align:center; padding:50px; color:#ff4757;">앗! 에러가 발생했어요.<br><br><b>${e.message}</b></div>`;
             }
         }
@@ -125,13 +134,13 @@
 
         function renderSubtitles() {
             const box = document.getElementById('subtitles-box');
-            box.innerHTML = ''; 
+            box.innerHTML = '';
 
             subtitlesData.forEach((sub, index) => {
                 const div = document.createElement('div');
                 div.className = 'subtitle-item';
                 div.id = 'sub-' + index;
-                
+
                 const textGroup = document.createElement('div');
                 textGroup.className = 'subtitle-text-group';
                 textGroup.innerHTML = `
@@ -139,7 +148,7 @@
                     <div class="translated-text">${sub.trans}</div>
                 `;
                 textGroup.onclick = () => {
-                    if(player && player.seekTo) {
+                    if (player && player.seekTo) {
                         player.seekTo(sub.start);
                         player.playVideo();
                     }
@@ -160,7 +169,7 @@
             event.stopPropagation();
             const sub = subtitlesData[index];
             const chatHistory = document.getElementById('chat-history');
-            
+
             const userBubble = document.createElement('div');
             userBubble.className = 'chat-bubble user';
             userBubble.innerHTML = `"${sub.orig}"<br><br>이 문장은 왜 이렇게 번역되는 거야?`;
@@ -179,16 +188,16 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ sentence: sub.orig })
                 });
-                
+
                 const data = await response.json();
-                
+
                 chatHistory.removeChild(loadingBubble);
                 const botBubble = document.createElement('div');
                 botBubble.className = 'chat-bubble bot';
                 botBubble.innerHTML = data.explanation || data.error;
                 chatHistory.appendChild(botBubble);
                 chatHistory.scrollTop = chatHistory.scrollHeight;
-                
+
             } catch (e) {
                 chatHistory.removeChild(loadingBubble);
                 const errorBubble = document.createElement('div');
