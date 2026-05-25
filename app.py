@@ -31,9 +31,10 @@ def get_subtitles():
     if not OPENAI_API_KEY:
         return jsonify({'error': 'OpenAI API 키가 설정되지 않았습니다. (Secrets를 확인하세요!)'}), 500
 
+    # m4a 대신 변환기가 필요 없는 webm 포맷으로 변경
     audio_filename = f"{video_id}.webm"
     
-   try:
+    try:
         # [과정 1] 유튜브에서 소리만 다운로드
         ydl_opts = {
             'format': 'bestaudio[ext=webm]/bestaudio',
@@ -56,7 +57,7 @@ def get_subtitles():
         if os.path.exists(audio_filename):
             os.remove(audio_filename)
 
-        # [과정 3] 다국어 원문을 한국어로 실시간 번역 및 빈 자막 에러 방지
+        # [과정 3] 다국어 원문을 한국어로 실시간 번역
         merged_subtitles = []
         translator = GoogleTranslator(source='auto', target='ko')
         
@@ -79,7 +80,7 @@ def get_subtitles():
                 
         return jsonify(merged_subtitles)
         
-    except Exception as e: # <--- 아까 실수로 지워졌던 짝꿍이 바로 이 녀석입니다!
+    except Exception as e:
         if os.path.exists(audio_filename):
             os.remove(audio_filename)
         return jsonify({'error': f'AI 음성 인식 중 오류가 발생했습니다: {str(e)}'}), 500
@@ -108,4 +109,4 @@ def chat_with_gemini():
         return jsonify({'error': 'AI 응답 오류가 발생했습니다.'}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000)
+    app.run(host='0.0.0.0', port=5000)
