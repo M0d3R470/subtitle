@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>동생을 위한 듀얼 자막 플레이어</title>
+    <style>
+        body { font-family: 'Pretendard', sans-serif; background-color: #121212; color: #ffffff; margin: 0; padding: 40px 20px; display: flex; justify-content: center; }
+        .layout-wrapper { display: flex; gap: 30px; width: 100%; max-width: 1100px; align-items: flex-start; }
+        .main-container { flex: 2.5; width: 100%; }
+        .input-group { display: flex; gap: 10px; margin-bottom: 20px; }
+        .input-group input { flex: 1; padding: 15px; border-radius: 10px; border: 1px solid #333; background-color: #1e1e1e; color: #fff; font-size: 16px; outline: none; }
+        .input-group input:focus { border-color: #ff4757; }
+        .input-group button { padding: 15px 25px; border-radius: 10px; border: none; background-color: #ff4757; color: white; font-weight: bold; font-size: 16px; cursor: pointer; }
+        .input-group button:hover { background-color: #ff6b81; }
+        .video-wrapper { position: relative; padding-bottom: 56.25%; height: 0; margin-bottom: 20px; border-radius: 12px; overflow: hidden; background-color: #000; box-shadow: 0 4px 15px rgba(0,0,0,0.5); }
+        .video-wrapper iframe { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        .subtitles-container { background-color: #1e1e1e; border-radius: 12px; padding: 20px; height: 350px; overflow-y: auto; border: 1px solid #333; scroll-behavior: smooth; }
+        .subtitle-item { padding: 15px; border-radius: 8px; margin-bottom: 10px; transition: all 0.3s ease; opacity: 0.4; cursor: pointer; display: flex; justify-content: space-between; align-items: center; }
+        .subtitle-item.active { opacity: 1; background-color: #2c2c2c; transform: scale(1.02); border-left: 4px solid #ff4757; }
+        .subtitle-text-group { flex: 1; padding-right: 15px; }
+        .original-text { font-size: 18px; font-weight: bold; color: #ffffff; margin-bottom: 5px; }
+        .translated-text { font-size: 14px; font-weight: normal; color: #a4b0be; }
+        .help-btn { background-color: #333; color: #fff; border: none; border-radius: 50%; width: 35px; height: 35px; font-size: 16px; font-weight: bold; cursor: pointer; display: flex; justify-content: center; align-items: center; transition: all 0.2s; }
+        .help-btn:hover { background-color: #ff4757; transform: scale(1.1); }
+        .sidebar { flex: 1; min-width: 320px; display: flex; flex-direction: column; gap: 20px; }
+        .instructions-box { background-color: #1e1e1e; padding: 25px; border-radius: 12px; border: 1px solid #333; }
+        .instructions-box h2 { margin-top: 0; color: #ff4757; font-size: 20px; border-bottom: 2px solid #333; padding-bottom: 15px; margin-bottom: 15px; }
+        .instructions { padding-left: 20px; line-height: 1.6; color: #e0e0e0; font-size: 14px; margin: 0; }
+        .chatbot-box { background-color: #1e1e1e; border-radius: 12px; border: 1px solid #333; display: flex; flex-direction: column; height: 400px; overflow: hidden; }
+        .chatbot-header { background-color: #2c2c2c; padding: 15px; font-weight: bold; color: #fff; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid #333; }
+        .chatbot-history { flex: 1; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 15px; }
+        .chat-bubble { max-width: 85%; padding: 12px 15px; border-radius: 12px; font-size: 14px; line-height: 1.5; word-break: break-word; }
+        .chat-bubble.bot { background-color: #2c2c2c; color: #e0e0e0; align-self: flex-start; border-bottom-left-radius: 2px; }
+        .chat-bubble.user { background-color: #ff4757; color: #fff; align-self: flex-end; border-bottom-right-radius: 2px; }
+        .chat-bubble strong { color: #ff9f43; }
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #1e1e1e; }
+        ::-webkit-scrollbar-thumb { background: #555; border-radius: 4px; }
+        @media (max-width: 900px) { .layout-wrapper { flex-direction: column; } .sidebar { width: 100%; } }
+    </style>
+</head>
+<body>
+    <div class="layout-wrapper">
+        <main class="main-container">
+            <div class="input-group">
+                <input type="text" id="youtube-url" placeholder="유튜브 영상 URL을 입력하세요!" value="https://www.youtube.com/watch?v=a1zDuOPkWSw">
+                <button onclick="loadVideo()">영상 불러오기</button>
+            </div>
+            <div class="video-wrapper"><div id="player"></div></div>
+            <div class="subtitles-container" id="subtitles-box">
+                <div style="text-align:center; padding:50px; color:#a4b0be;">
+                    위에 유튜브 URL을 넣고 '영상 불러오기'를 눌러주세요! 📺
+                </div>
+            </div>
+        </main>
+        <aside class="sidebar">
+            <div class="instructions-box">
+                <h2>📝 사용 방법</h2>
+                <ol class="instructions">
+                    <li>유튜브 <strong>영상 주소(URL)</strong>를 복사해 불러옵니다.</li>
+                    <li>자막은 영상 속도에 맞춰 <strong>자동 스크롤</strong>됩니다.</li>
+                    <li>문장을 클릭하면 <strong>해당 구간으로 이동</strong>합니다.</li>
+                    <li>자막 옆 <strong>[?] 버튼</strong>을 누르면 제미나이가 문법과 표현을 해설해 줍니다.</li>
+                </ol>
+            </div>
+            <div class="chatbot-box">
+                <div class="chatbot-header">✨ 제미나이 튜터</div>
+                <div class="chatbot-history" id="chat-history">
+                    <div class="chat-bubble bot">안녕하세요! 자막 옆의 <strong>'?' 버튼</strong>을 누르면, 이 문장이 왜 이렇게 번역되었는지 구조와 표현을 자세히 해설해 드릴게요. 궁금한 문장이 있다면 언제든 눌러주세요! 😊</div>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <script src="https://www.youtube.com/iframe_api"></script>
+    <script>
+        let player;
+        let syncInterval;
+        let subtitlesData = [];
+
+        function onYouTubeIframeAPIReady() {
+            player = new YT.Player('player', {
+                height: '360',
+                width: '640',
+                videoId: '', 
+                events: { 'onStateChange': onPlayerStateChange }
+            });
+        }
+
+        async function loadVideo() {
+            const url = document.getElementById('youtube-url').value;
+            const videoId = extractVideoID(url);
+            
+            if (!videoId) {
+                alert("올바른 유튜브 URL을 입력해주세요.");
+                return;
+            }
+            
+            player.loadVideoById(videoId);
+            const box = document.getElementById('subtitles-box');
+            box.innerHTML = '<div style="text-align:center; padding:50px; color:#a4b0be;">자막을 마법처럼 가져오는 중입니다... 🧙‍♂️✨</div>';
+            
+            try {
+                const response = await fetch(`/api/subtitles?video_id=${videoId}`);
+                if (!response.ok) throw new Error('자막을 불러오는데 실패했습니다.');
+                
+                const data = await response.json();
+                if (data.error) throw new Error(data.error);
+                
+                subtitlesData = data;
+                renderSubtitles();
+            } catch (e) {
+                box.innerHTML = `<div style="text-align:center; padding:50px; color:#ff4757;">앗! 에러가 발생했어요.<br>${e.message}<br><br>(※ AI 분석에 시간이 조금 걸릴 수 있습니다.)</div>`;
+            }
+        }
+
+        function extractVideoID(url) {
+            const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+            const match = url.match(regExp);
+            return (match && match[2].length === 11) ? match[2] : null;
+        }
+
+        function renderSubtitles() {
+            const box = document.getElementById('subtitles-box');
+            box.innerHTML = ''; 
+
+            subtitlesData.forEach((sub, index) => {
+                const div = document.createElement('div');
+                div.className = 'subtitle-item';
+                div.id = 'sub-' + index;
+                
+                const textGroup = document.createElement('div');
+                textGroup.className = 'subtitle-text-group';
+                textGroup.innerHTML = `
+                    <div class="original-text">${sub.orig}</div>
+                    <div class="translated-text">${sub.trans}</div>
+                `;
+                textGroup.onclick = () => {
+                    if(player && player.seekTo) {
+                        player.seekTo(sub.start);
+                        player.playVideo();
+                    }
+                };
+
+                const helpBtn = document.createElement('button');
+                helpBtn.className = 'help-btn';
+                helpBtn.innerText = '?';
+                helpBtn.onclick = (e) => askGemini(e, index);
+
+                div.appendChild(textGroup);
+                div.appendChild(helpBtn);
+                box.appendChild(div);
+            });
+        }
+
+        async function askGemini(event, index) {
+            event.stopPropagation();
+            const sub = subtitlesData[index];
+            const chatHistory = document.getElementById('chat-history');
+            
+            const userBubble = document.createElement('div');
+            userBubble.className = 'chat-bubble user';
+            userBubble.innerHTML = `"${sub.orig}"<br><br>노예는 노예답게 해설이나 해라 이거야?`;
+            chatHistory.appendChild(userBubble);
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+
+            const loadingBubble = document.createElement('div');
+            loadingBubble.className = 'chat-bubble bot';
+            loadingBubble.innerHTML = '분석 중...';
+            chatHistory.appendChild(loadingBubble);
+            chatHistory.scrollTop = chatHistory.scrollHeight;
+
+            try {
+                const response = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sentence: sub.orig })
+                });
+                
+                const data = await response.json();
+                
+                chatHistory.removeChild(loadingBubble);
+                const botBubble = document.createElement('div');
+                botBubble.className = 'chat-bubble bot';
+                botBubble.innerHTML = data.explanation || data.error;
+                chatHistory.appendChild(botBubble);
+                chatHistory.scrollTop = chatHistory.scrollHeight;
+                
+            } catch (e) {
+                chatHistory.removeChild(loadingBubble);
+                const errorBubble = document.createElement('div');
+                errorBubble.className = 'chat-bubble bot';
+                errorBubble.innerHTML = '앗, 서버와 연결에 문제가 생겼어요. 다시 눌러주세요!';
+                chatHistory.appendChild(errorBubble);
+                chatHistory.scrollTop = chatHistory.scrollHeight;
+            }
+        }
+
+        function onPlayerStateChange(event) {
+            if (event.data == YT.PlayerState.PLAYING) {
+                syncInterval = setInterval(syncSubtitles, 500);
+            } else {
+                clearInterval(syncInterval);
+            }
+        }
+
+        function syncSubtitles() {
+            if (!player || !player.getCurrentTime || subtitlesData.length === 0) return;
+            const currentTime = player.getCurrentTime();
+            let activeIndex = -1;
+
+            for (let i = 0; i < subtitlesData.length; i++) {
+                if (currentTime >= subtitlesData[i].start && currentTime < subtitlesData[i].end) {
+                    activeIndex = i;
+                    break;
+                }
+            }
+
+            document.querySelectorAll('.subtitle-item').forEach(item => item.classList.remove('active'));
+
+            if (activeIndex !== -1) {
+                const activeElement = document.getElementById('sub-' + activeIndex);
+                if (activeElement) {
+                    activeElement.classList.add('active');
+                    const box = document.getElementById('subtitles-box');
+                    const scrollPos = activeElement.offsetTop - box.offsetTop - (box.clientHeight / 2) + (activeElement.clientHeight / 2);
+                    box.scrollTo({ top: scrollPos, behavior: 'smooth' });
+                }
+            }
+        }
+    </script>
+</body>
+</html>
