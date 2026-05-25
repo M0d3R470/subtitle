@@ -12,7 +12,7 @@ GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
     stt_model = genai.GenerativeModel('gemini-3-flash-preview') 
-    tutor_model = genai.GenerativeModel('gemini-3.1-pro-preview')
+    tutor_model = genai.GenerativeModel('gemini-3-flash-preview')
 
 @app.route('/')
 def index():
