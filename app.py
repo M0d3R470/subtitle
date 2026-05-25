@@ -1,6 +1,8 @@
 import os
 import json
 import time
+import math
+import subprocess
 import yt_dlp
 from flask import Flask, request, jsonify, send_file
 import google.generativeai as genai
@@ -65,6 +67,89 @@ MIN_WORDS    = 4    # 이 단어 수 미만이면 다음에 붙임
 MAX_WORDS    = 18   # 이 단어 수 초과하면 문장 경계에서 끊음
 MAX_GAP_SEC  = 1.5  # 이 시간 이상 간격이면 강제로 끊음
 SENTENCE_ENDS = {'.', '!', '?', '...'}
+CHUNK_SEC = 30  # 청크 길이 (초)
+
+
+# ── 유틸: 오디오를 청크로 분할 ───────────────────────────
+def split_audio(src: str, chunk_sec: int = CHUNK_SEC) -> List[str]:
+    """ffmpeg로 오디오를 chunk_sec 단위로 분할, 파일 경로 리스트 반환."""
+    # 총 길이 확인
+    probe = subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+         '-of', 'default=noprint_wrappers=1:nokey=1', src],
+        capture_output=True, text=True
+    )
+    total_sec = float(probe.stdout.strip())
+    n_chunks  = math.ceil(total_sec / chunk_sec)
+
+    paths = []
+    base  = src.rsplit('.', 1)[0]
+    for i in range(n_chunks):
+        out = f"{base}_chunk{i:03d}.m4a"
+        subprocess.run([
+            'ffmpeg', '-y', '-i', src,
+            '-ss', str(i * chunk_sec),
+            '-t',  str(chunk_sec),
+            '-c',  'copy', out
+        ], capture_output=True)
+        if os.path.exists(out):
+            paths.append((out, i * chunk_sec))  # (파일경로, 오프셋)
+    return paths
+
+
+# ── 유틸: 청크 하나를 Gemini STT+번역 ───────────────────
+def transcribe_chunk(audio_path: str, offset: float) -> List[dict]:
+    """청크 파일을 Gemini로 분석, 타임스탬프에 offset 적용해서 반환."""
+    uf = genai.upload_file(path=audio_path, mime_type='audio/mp4')
+    wait_until_active(uf)
+
+    prompt = """You are a professional subtitle transcriber and translator.
+Listen to this audio clip and produce subtitles. For each segment:
+- Transcribe exact spoken words into "orig"
+- Translate naturally into Korean (구어체) into "trans"
+- Each segment = one full sentence or natural phrase (min 4-5 words)
+- Do NOT split single words into separate segments
+- Timestamps are relative to the START of this audio clip (start from 0)
+- Be as precise as possible with timestamps
+- Preserve tone, humor, sarcasm; localize idioms"""
+
+    try:
+        resp = stt_model.generate_content(
+            [prompt, uf],
+            generation_config=types.GenerationConfig(
+                response_mime_type='application/json',
+                response_schema=list[Segment],
+            ),
+        )
+        raw = (resp.text or '').strip()
+        if not raw:
+            return []
+        if raw.startswith('```'):
+            raw = raw.split('```')[1]
+            if raw.startswith('json'):
+                raw = raw[4:]
+            raw = raw.strip()
+        segs = json.loads(raw)
+    except Exception:
+        return []
+    finally:
+        try:
+            genai.delete_file(uf.name)
+        except Exception:
+            pass
+
+    result = []
+    for seg in segs:
+        orig = (seg.get('orig') or '').strip()
+        if not orig:
+            continue
+        result.append({
+            'start': round(float(seg.get('start', 0)) + offset, 3),
+            'end':   round(float(seg.get('end',   0)) + offset, 3),
+            'orig':  orig,
+            'trans': (seg.get('trans') or '').strip(),
+        })
+    return result
 
 def _split_long_segment(seg):
     words = seg['orig'].split()
@@ -285,7 +370,7 @@ def get_subtitles():
                 ]
                 return jsonify(result)
 
-        # ② 자막 없으면 Gemini STT 폴백
+        # ② 자막 없으면 Gemini STT 폴백 (청크 방식)
         ydl_audio_opts = {
             'format':      '140/bestaudio[ext=m4a]/bestaudio',
             'outtmpl':     audio_path,
@@ -299,59 +384,31 @@ def get_subtitles():
         if not os.path.exists(audio_path):
             raise FileNotFoundError("오디오 다운로드에 실패했습니다.")
 
-        uploaded_file = genai.upload_file(path=audio_path, mime_type="audio/mp4")
-        if uploaded_file is None:
-            raise RuntimeError("파일 업로드 자체가 실패했습니다.")
+        # 오디오를 30초 청크로 분할
+        chunks = split_audio(audio_path)
+        if not chunks:
+            raise RuntimeError("오디오 청크 분할에 실패했습니다.")
 
-        wait_until_active(uploaded_file)
+        # 각 청크를 순서대로 Gemini STT
+        all_segments = []
+        for chunk_path, offset in chunks:
+            segs = transcribe_chunk(chunk_path, offset)
+            all_segments.extend(segs)
+            safe_delete_local(chunk_path)
 
-        prompt = """You are a professional subtitle transcriber and translator.
-Listen to this audio and produce subtitles. For each segment:
-- Transcribe exact spoken words into "orig"
-- Translate naturally into Korean (구어체) into "trans"
-- Each segment = one full sentence or natural phrase (min 4-5 words)
-- Do NOT split single words into separate segments
-- Timestamps must be as accurate as possible in seconds
-- Preserve tone, humor, sarcasm, slang (localize idioms, do not translate literally)"""
+        if not all_segments:
+            raise RuntimeError("음성 인식 결과가 없습니다.")
 
-        response = stt_model.generate_content(
-            [prompt, uploaded_file],
-            generation_config=types.GenerationConfig(
-                response_mime_type="application/json",
-                response_schema=list[Segment],
-            ),
-        )
-
-        raw = (response.text or "").strip()
-        if not raw:
-            finish = getattr(response.candidates[0], 'finish_reason', 'UNKNOWN') if response.candidates else 'NO_CANDIDATES'
-            raise RuntimeError(f"Gemini 빈 응답. finish_reason={finish}")
-
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
-        try:
-            segments = json.loads(raw)
-        except json.JSONDecodeError as je:
-            raise RuntimeError(f"JSON 파싱 실패: {je} / 앞 200자: {raw[:200]}")
-
-        valid_segments = [
-            seg for seg in segments
-            if isinstance(seg.get('orig'), str) and seg['orig'].strip()
-        ]
-        valid_segments = merge_short_segments(valid_segments)
+        all_segments = merge_short_segments(all_segments)
 
         result = [
             {
-                'start': float(seg.get('start', 0)),
-                'end':   float(seg.get('end', 0)),
-                'orig':  seg['orig'].strip(),
-                'trans': seg.get('trans', '').strip(),
+                'start': seg['start'],
+                'end':   seg['end'],
+                'orig':  seg['orig'],
+                'trans': seg['trans'],
             }
-            for seg in valid_segments
+            for seg in all_segments
         ]
         return jsonify(result)
 
