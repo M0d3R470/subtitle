@@ -13,8 +13,8 @@ GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
     # 음성 인식은 미친 속도의 'gemini-3.0-flash', 해설은 튜터용 최고 성능인 'gemini-3.0-pro'로 세팅!
-    stt_model = genai.GenerativeModel('gemini-3.0-flash') 
-    tutor_model = genai.GenerativeModel('gemini-3.0-pro')
+    stt_model = genai.GenerativeModel('gemini-3-flash-preview') 
+    tutor_model = genai.GenerativeModel('gemini-3.1-pro-preview')
 
 @app.route('/')
 def index():
