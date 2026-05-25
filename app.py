@@ -140,6 +140,90 @@ def merge_short_segments(segments):
 
 
 
+# ── 유틸: VTT 자막 파싱 ─────────────────────────────────
+import re
+
+def _vtt_time_to_sec(t: str) -> float:
+    parts = t.strip().split(':')
+    if len(parts) == 3:
+        h, m, s = parts
+    else:
+        h, m, s = 0, parts[0], parts[1]
+    return int(h) * 3600 + int(m) * 60 + float(s.replace(',', '.'))
+
+def parse_vtt(filepath: str) -> List[dict]:
+    segments = []
+    with open(filepath, 'r', encoding='utf-8') as f:
+        text = f.read()
+
+    # 타임스탬프 블록 파싱
+    blocks = re.split(r'\n\n+', text.strip())
+    for block in blocks:
+        lines = block.strip().splitlines()
+        # 타임스탬프 줄 찾기
+        ts_line = None
+        text_lines = []
+        for line in lines:
+            if '-->' in line:
+                ts_line = line
+            elif ts_line and line.strip() and not line.strip().isdigit():
+                # HTML 태그 제거
+                clean = re.sub(r'<[^>]+>', '', line).strip()
+                if clean:
+                    text_lines.append(clean)
+
+        if not ts_line or not text_lines:
+            continue
+
+        try:
+            start_str, end_str = ts_line.split('-->')[0].strip(), ts_line.split('-->')[1].split()[0].strip()
+            start = _vtt_time_to_sec(start_str)
+            end   = _vtt_time_to_sec(end_str)
+        except Exception:
+            continue
+
+        orig = ' '.join(text_lines)
+        if orig:
+            segments.append({'start': start, 'end': end, 'orig': orig, 'trans': ''})
+
+    # 중복 제거 (VTT는 같은 텍스트가 여러 블록에 걸쳐 나오는 경우 있음)
+    deduped = []
+    seen = set()
+    for seg in segments:
+        key = (round(seg['start'], 1), seg['orig'][:30])
+        if key not in seen:
+            seen.add(key)
+            deduped.append(seg)
+
+    return deduped
+
+
+# ── 유틸: Gemini로 번역 (텍스트만) ──────────────────────
+TRANS_SEPARATOR = "\n|||\n"
+
+def gemini_batch_translate(texts: List[str]) -> List[str]:
+    if not texts:
+        return []
+    joined = TRANS_SEPARATOR.join(texts)
+    prompt = f"""Translate the following English subtitle lines into natural Korean (구어체).
+Each line is separated by "|||". Keep the same number of lines and the same order.
+Preserve tone, humor, and nuance. Return ONLY the translated lines separated by "|||", nothing else.
+
+{joined}"""
+    try:
+        resp = stt_model.generate_content(prompt)
+        parts = resp.text.strip().split(TRANS_SEPARATOR)
+        if len(parts) == len(texts):
+            return [p.strip() for p in parts]
+        # 수가 안 맞으면 줄 수 기준으로 맞추기
+        result = []
+        for i, t in enumerate(texts):
+            result.append(parts[i].strip() if i < len(parts) else t)
+        return result
+    except Exception:
+        return texts
+
+
 # ── 라우트 ────────────────────────────────────────────────
 @app.route('/')
 def index():
@@ -152,45 +236,83 @@ def get_subtitles():
     if not video_id:
         return jsonify({'error': '비디오 ID가 없습니다.'}), 400
 
-    audio_path    = f"{video_id}.m4a"
+    audio_path = f"{video_id}.m4a"
+    sub_path   = f"{video_id}.en.vtt"
     uploaded_file = None
 
     try:
-        # ① 유튜브 오디오 다운로드
-        ydl_opts = {
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+        # ① 유튜브 자막 시도 (타임스탬프 정확도 최우선)
+        ydl_sub_opts = {
+            'skip_download':     True,
+            'writesubtitles':    True,
+            'writeautomaticsub': True,
+            'subtitleslangs':    ['en', 'en-US', 'en-GB'],
+            'subtitlesformat':   'vtt',
+            'outtmpl':           video_id,
+            'quiet':             True,
+            'noplaylist':        True,
+        }
+        with yt_dlp.YoutubeDL(ydl_sub_opts) as ydl:
+            ydl.download([url])
+
+        # 다운로드된 vtt 파일 찾기 (언어 코드가 다를 수 있음)
+        vtt_file = None
+        for fname in os.listdir('.'):
+            if fname.startswith(video_id) and fname.endswith('.vtt'):
+                vtt_file = fname
+                break
+
+        if vtt_file:
+            # ── VTT 파싱 경로 ──────────────────────────────
+            segments = parse_vtt(vtt_file)
+            os.remove(vtt_file)
+
+            if segments:
+                segments = merge_short_segments(segments)
+                # 텍스트만 Gemini로 번역
+                originals    = [s['orig'] for s in segments]
+                translations = gemini_batch_translate(originals)
+                result = [
+                    {
+                        'start': s['start'],
+                        'end':   s['end'],
+                        'orig':  s['orig'],
+                        'trans': t,
+                    }
+                    for s, t in zip(segments, translations)
+                ]
+                return jsonify(result)
+
+        # ② 자막 없으면 Gemini STT 폴백
+        ydl_audio_opts = {
             'format':      '140/bestaudio[ext=m4a]/bestaudio',
             'outtmpl':     audio_path,
             'quiet':       True,
             'noplaylist':  True,
             'extractor_args': {'youtube': {'skip': ['dash', 'hls']}},
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+        with yt_dlp.YoutubeDL(ydl_audio_opts) as ydl:
+            ydl.download([url])
 
         if not os.path.exists(audio_path):
             raise FileNotFoundError("오디오 다운로드에 실패했습니다.")
 
-        # ② 구글 서버에 업로드
         uploaded_file = genai.upload_file(path=audio_path, mime_type="audio/mp4")
         if uploaded_file is None:
             raise RuntimeError("파일 업로드 자체가 실패했습니다.")
 
         wait_until_active(uploaded_file)
 
-        # ③ Gemini STT + 번역 한 번에
         prompt = """You are a professional subtitle transcriber and translator.
-
-Listen to this audio carefully and produce subtitles. For each subtitle segment:
-- Transcribe the exact spoken words accurately into the "orig" field
-- Translate naturally into Korean in the "trans" field (not word-for-word, but natural Korean that sounds fluent)
-- Each segment should be a full sentence or natural phrase (minimum 4-5 words)
+Listen to this audio and produce subtitles. For each segment:
+- Transcribe exact spoken words into "orig"
+- Translate naturally into Korean (구어체) into "trans"
+- Each segment = one full sentence or natural phrase (min 4-5 words)
 - Do NOT split single words into separate segments
-- Timestamps must be accurate in seconds
-
-Important translation rules:
-- Use natural, colloquial Korean (구어체)
-- Preserve the tone and nuance of the original (humor, sarcasm, emphasis)
-- Slang and idioms should be localized, not literally translated"""
+- Timestamps must be as accurate as possible in seconds
+- Preserve tone, humor, sarcasm, slang (localize idioms, do not translate literally)"""
 
         response = stt_model.generate_content(
             [prompt, uploaded_file],
@@ -200,11 +322,10 @@ Important translation rules:
             ),
         )
 
-        # 응답 검증
         raw = (response.text or "").strip()
         if not raw:
             finish = getattr(response.candidates[0], 'finish_reason', 'UNKNOWN') if response.candidates else 'NO_CANDIDATES'
-            raise RuntimeError(f"Gemini가 빈 응답을 반환했습니다. finish_reason={finish}")
+            raise RuntimeError(f"Gemini 빈 응답. finish_reason={finish}")
 
         if raw.startswith("```"):
             raw = raw.split("```")[1]
@@ -213,20 +334,16 @@ Important translation rules:
             raw = raw.strip()
 
         try:
-            segments: List[dict] = json.loads(raw)
+            segments = json.loads(raw)
         except json.JSONDecodeError as je:
-            raise RuntimeError(f"JSON 파싱 실패: {je} / 원본 앞 200자: {raw[:200]}")
+            raise RuntimeError(f"JSON 파싱 실패: {je} / 앞 200자: {raw[:200]}")
 
-        # ④ 빈 세그먼트 제거
         valid_segments = [
             seg for seg in segments
             if isinstance(seg.get('orig'), str) and seg['orig'].strip()
         ]
-
-        # ⑤ 짧은 세그먼트 병합
         valid_segments = merge_short_segments(valid_segments)
 
-        # ⑥ 최종 조립
         result = [
             {
                 'start': float(seg.get('start', 0)),
@@ -236,7 +353,6 @@ Important translation rules:
             }
             for seg in valid_segments
         ]
-
         return jsonify(result)
 
     except Exception as e:
@@ -245,6 +361,10 @@ Important translation rules:
     finally:
         safe_delete_remote(uploaded_file)
         safe_delete_local(audio_path)
+        # 혹시 남은 vtt 파일 정리
+        for fname in list(os.listdir('.')):
+            if fname.startswith(video_id) and fname.endswith('.vtt'):
+                safe_delete_local(fname)
 
 
 @app.route('/api/chat', methods=['POST'])
@@ -255,16 +375,15 @@ def chat_with_gemini():
     if not sentence:
         return jsonify({'error': '문장이 없습니다.'}), 400
 
-    prompt = f"""아래 영어 문장을 한국어로 해설해주세요.
+    prompt = f"""해설해주세요.
 
 문장: "{sentence}"
 
 조건:
-1. 문장 구조 문법적으로 해설 (주어, 동사, 목적어, 핵심 문법)
+1. 문장 구조 해설 (주어, 동사, 목적어, 핵심 문법)
 2. 중요 표현·단어·숙어 설명
-3. 정중한 한국어 존댓말 사용
-4. 짧고 간결한 설명
-5. 줄바꿈을 적절히 활용하여 가독성을 높이기
+3. 줄바꿈을 적극 활용하여 가독성 있게 서술
+4. 정중한 한국어 존댓말 사용
 """
 
     try:
