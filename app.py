@@ -101,10 +101,11 @@ def get_subtitles():
     try:
         # ① 유튜브 오디오 다운로드
         ydl_opts = {
-            'format':     'bestaudio[ext=m4a]/140/bestaudio',
-            'outtmpl':    audio_path,
-            'quiet':      True,
-            'noplaylist': True,
+            'format':      '140/bestaudio[ext=m4a]/bestaudio',
+            'outtmpl':     audio_path,
+            'quiet':       True,
+            'noplaylist':  True,
+            'extractor_args': {'youtube': {'skip': ['dash', 'hls']}},
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
