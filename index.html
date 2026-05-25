@@ -210,7 +210,7 @@
 
         function onPlayerStateChange(event) {
             if (event.data == YT.PlayerState.PLAYING) {
-                syncInterval = setInterval(syncSubtitles, 500);
+                syncInterval = setInterval(syncSubtitles, 100); // 100ms로 단축
             } else {
                 clearInterval(syncInterval);
             }
@@ -221,10 +221,24 @@
             const currentTime = player.getCurrentTime();
             let activeIndex = -1;
 
+            // 1순위: start~end 안에 있는 자막
             for (let i = 0; i < subtitlesData.length; i++) {
                 if (currentTime >= subtitlesData[i].start && currentTime < subtitlesData[i].end) {
                     activeIndex = i;
                     break;
+                }
+            }
+
+            // 2순위: end를 지났지만 다음 자막 start 전인 경우 → 현재 자막 유지
+            if (activeIndex === -1) {
+                for (let i = subtitlesData.length - 1; i >= 0; i--) {
+                    if (currentTime >= subtitlesData[i].start) {
+                        const nextStart = i + 1 < subtitlesData.length ? subtitlesData[i + 1].start : Infinity;
+                        if (currentTime < nextStart) {
+                            activeIndex = i;
+                        }
+                        break;
+                    }
                 }
             }
 
