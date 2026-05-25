@@ -18,8 +18,8 @@ if not GOOGLE_API_KEY:
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
-stt_model   = genai.GenerativeModel('gemini-3-flash-preview')
-tutor_model = genai.GenerativeModel('gemini-3.1-pro-preview')
+stt_model   = genai.GenerativeModel('gemini-2.5-flash')
+tutor_model = genai.GenerativeModel('gemini-2.5-flash')
 
 # ── Pydantic 스키마 (response_schema용) ───────────────────
 class Segment(BaseModel):
