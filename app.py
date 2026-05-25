@@ -60,17 +60,67 @@ def safe_delete_remote(uploaded_file) -> None:
         pass
 
 
-# ── 유틸: 단어 단위 세그먼트 병합 ────────────────────────
-MIN_WORDS   = 4
-MAX_GAP_SEC = 1.5
+# -- 유틸: 세그먼트 길이 조정 (병합 + 분할) ---------
+MIN_WORDS    = 4    # 이 단어 수 미만이면 다음에 붙임
+MAX_WORDS    = 18   # 이 단어 수 초과하면 문장 경계에서 끊음
+MAX_GAP_SEC  = 1.5  # 이 시간 이상 간격이면 강제로 끊음
+SENTENCE_ENDS = {'.', '!', '?', '...'}
 
-def merge_short_segments(segments: List[dict]) -> List[dict]:
+def _split_long_segment(seg):
+    words = seg['orig'].split()
+    if len(words) <= MAX_WORDS:
+        return [seg]
+
+    # orig를 문장 부호 기준으로 쪼개기
+    chunks_orig = []
+    buf_words = []
+    for word in words:
+        buf_words.append(word)
+        if any(word.rstrip('"\'\u2019').endswith(e) for e in SENTENCE_ENDS) and len(buf_words) >= MIN_WORDS:
+            chunks_orig.append(' '.join(buf_words))
+            buf_words = []
+    if buf_words:
+        if chunks_orig:
+            chunks_orig[-1] += ' ' + ' '.join(buf_words)
+        else:
+            chunks_orig.append(' '.join(buf_words))
+
+    # 번역 균등 분할
+    trans_words = seg.get('trans', '').split()
+    n = len(chunks_orig)
+    chunk_size = max(1, len(trans_words) // n)
+    chunks_trans = []
+    for i in range(n):
+        s = i * chunk_size
+        e = s + chunk_size if i < n - 1 else len(trans_words)
+        chunks_trans.append(' '.join(trans_words[s:e]))
+
+    # 타임스탬프 단어 수 비례 배분
+    total_dur = seg['end'] - seg['start']
+    total_words = max(1, sum(len(c.split()) for c in chunks_orig))
+    result = []
+    cursor = seg['start']
+    for o, t in zip(chunks_orig, chunks_trans):
+        dur = total_dur * len(o.split()) / total_words
+        result.append({
+            'start': round(cursor, 3),
+            'end':   round(cursor + dur, 3),
+            'orig':  o.strip(),
+            'trans': t.strip(),
+        })
+        cursor += dur
+    return result
+
+
+def merge_short_segments(segments):
     if not segments:
         return []
+
+    # 1단계: 짧은 것 병합
     merged = []
     buf = dict(segments[0])
     for seg in segments[1:]:
-        gap        = seg['start'] - buf['end']
+        gap = seg['start'] - buf['end']
         word_count = len(buf['orig'].split())
         if word_count < MIN_WORDS and gap <= MAX_GAP_SEC:
             buf['orig']  += ' ' + seg['orig']
@@ -80,7 +130,14 @@ def merge_short_segments(segments: List[dict]) -> List[dict]:
             merged.append(buf)
             buf = dict(seg)
     merged.append(buf)
-    return merged
+
+    # 2단계: 긴 것 분할
+    result = []
+    for seg in merged:
+        result.extend(_split_long_segment(seg))
+    return result
+
+
 
 
 # ── 라우트 ────────────────────────────────────────────────
@@ -203,9 +260,10 @@ def chat_with_gemini():
 문장: "{sentence}"
 
 조건:
-1. 문장 구조 해설 (주어, 동사, 목적어, 핵심 문법)
+1. 문장 구조 문법적으로 해설 (주어, 동사, 목적어, 핵심 문법)
 2. 중요 표현·단어·숙어 설명
 3. 정중한 한국어 존댓말 사용
+4. 짧고 간결한 설명
 """
 
     try:
