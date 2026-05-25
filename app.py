@@ -18,8 +18,8 @@ if not GOOGLE_API_KEY:
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
-stt_model   = genai.GenerativeModel('gemini-2.5-flash')
-tutor_model = genai.GenerativeModel('gemini-2.5-flash')
+stt_model   = genai.GenerativeModel('gemini-3-flash-preview')
+tutor_model = genai.GenerativeModel('gemini-3.1-pro-preview')
 
 # ── Pydantic 스키마 (response_schema용) ───────────────────
 class Segment(BaseModel):
@@ -30,7 +30,6 @@ class Segment(BaseModel):
 
 # ── 유틸: 구글 파일 ACTIVE 대기 ───────────────────────────
 def wait_until_active(uploaded_file, timeout: int = 120) -> None:
-    """업로드된 파일이 ACTIVE 상태가 될 때까지 대기."""
     deadline = time.time() + timeout
     while True:
         info = genai.get_file(uploaded_file.name)
@@ -65,22 +64,45 @@ def safe_delete_remote(uploaded_file) -> None:
 SEPARATOR = "\n||||\n"
 
 def batch_translate(texts: List[str], target: str = 'ko') -> List[str]:
-    """
-    여러 텍스트를 SEPARATOR로 묶어 한 번에 번역한 뒤 다시 분리.
-    번역 실패 시 원문 반환.
-    """
     if not texts:
         return []
     joined = SEPARATOR.join(texts)
     try:
         translated = GoogleTranslator(source='auto', target=target).translate(joined)
         parts = translated.split(SEPARATOR)
-        # 분리된 조각 수가 다르면 원문으로 채움
         if len(parts) != len(texts):
             return texts
         return parts
     except Exception:
         return texts
+
+
+# ── 유틸: 단어 단위로 쪼개진 세그먼트 병합 ───────────────
+MIN_WORDS      = 4      # 이 단어 수 미만이면 다음 세그먼트에 붙임
+MAX_GAP_SEC    = 1.5    # 이 시간(초) 이상 간격이 벌어지면 강제로 끊음
+
+def merge_short_segments(segments: List[dict]) -> List[dict]:
+    """단어 단위로 쪼개진 세그먼트를 문장 단위로 병합."""
+    if not segments:
+        return []
+
+    merged = []
+    buf = dict(segments[0])  # start, end, orig 복사
+
+    for seg in segments[1:]:
+        gap        = seg['start'] - buf['end']
+        word_count = len(buf['orig'].split())
+
+        # 현재 버퍼가 너무 짧고, 간격도 크지 않으면 합치기
+        if word_count < MIN_WORDS and gap <= MAX_GAP_SEC:
+            buf['orig'] += ' ' + seg['orig']
+            buf['end']   = seg['end']
+        else:
+            merged.append(buf)
+            buf = dict(seg)
+
+    merged.append(buf)
+    return merged
 
 
 # ── 라우트 ────────────────────────────────────────────────
@@ -119,10 +141,13 @@ def get_subtitles():
 
         wait_until_active(uploaded_file)
 
-        # ③ Gemini STT (Pydantic 스키마로 structured output)
+        # ③ Gemini STT
         prompt = (
-            "Listen to this audio carefully and transcribe every spoken word "
-            "with accurate start and end timestamps in seconds. "
+            "Listen to this audio and transcribe it into subtitle segments. "
+            "Each segment must be a complete sentence or a meaningful phrase (at least 4-5 words). "
+            "Do NOT split individual words into separate segments. "
+            "Group words into natural spoken sentences or clauses. "
+            "Return accurate start and end timestamps in seconds for each segment. "
             "Return ONLY a valid JSON array. Do not include any explanation or markdown."
         )
         response = stt_model.generate_content(
@@ -136,11 +161,10 @@ def get_subtitles():
         # 응답 텍스트 검증
         raw = (response.text or "").strip()
         if not raw:
-            # finish_reason 등 디버그 정보 포함해서 에러 던지기
             finish = getattr(response.candidates[0], 'finish_reason', 'UNKNOWN') if response.candidates else 'NO_CANDIDATES'
             raise RuntimeError(f"Gemini가 빈 응답을 반환했습니다. finish_reason={finish}")
 
-        # ```json ... ``` 펜스 제거 (혹시 붙어오는 경우 대비)
+        # ```json ``` 펜스 제거
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -158,11 +182,14 @@ def get_subtitles():
             if isinstance(seg.get('orig'), str) and seg['orig'].strip()
         ]
 
-        # ⑤ 한 번에 번역
-        originals   = [seg['orig'].strip() for seg in valid_segments]
+        # ⑤ 단어 단위 세그먼트 후처리 병합
+        valid_segments = merge_short_segments(valid_segments)
+
+        # ⑥ 한 번에 번역
+        originals    = [seg['orig'].strip() for seg in valid_segments]
         translations = batch_translate(originals)
 
-        # ⑥ 최종 데이터 조립
+        # ⑦ 최종 데이터 조립
         result = [
             {
                 'start': float(seg.get('start', 0)),
@@ -179,7 +206,6 @@ def get_subtitles():
         return jsonify({'error': str(e)}), 500
 
     finally:
-        # 성공/실패 무관하게 항상 정리
         safe_delete_remote(uploaded_file)
         safe_delete_local(audio_path)
 
@@ -192,15 +218,14 @@ def chat_with_gemini():
     if not sentence:
         return jsonify({'error': '문장이 없습니다.'}), 400
 
-    prompt = f"""당신은 친절한 언어 튜터입니다. 아래 문장을 한국어로 해설해주세요.
+    prompt = f"""아래 문장을 한국어로 해설해주세요.
 
 문장: "{sentence}"
 
 조건:
 1. 문장 구조 해설 (주어, 동사, 핵심 문법 등)
 2. 중요 표현·단어 설명
-3. 동생에게 알려주듯 다정하고 친근한 말투
-4. 가독성을 위해 <strong>, <br> 등 HTML 태그 적절히 활용
+3. 정중한 한국어 존댓말 사용
 """
 
     try:
