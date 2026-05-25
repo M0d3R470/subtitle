@@ -125,7 +125,10 @@ def parse_json3(filepath):
         text     = re.sub(r'\s+', ' ', text).strip()
         if not text:
             continue
-        segments.append({'start': round(start_ms/1000,3), 'end': round((start_ms+dur_ms)/1000,3), 'orig': text, 'trans': ''})
+        OFFSET = 0.7  # 유튜브 자막은 실제 발화보다 약간 늦게 설정됨
+        start  = max(0, round(start_ms/1000 - OFFSET, 3))
+        end    = max(start + 0.1, round((start_ms + dur_ms)/1000 - OFFSET, 3))
+        segments.append({'start': start, 'end': end, 'orig': text, 'trans': ''})
     deduped, prev = [], ''
     for seg in segments:
         if seg['orig'] != prev:
@@ -238,19 +241,22 @@ def get_subtitles():
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     try:
-        # ① json3 자막 시도
-        ydl_sub_opts = {
-            'skip_download':     True,
-            'writesubtitles':    True,
-            'writeautomaticsub': True,
-            'subtitleslangs':    ['en', 'en-US', 'en-GB'],
-            'subtitlesformat':   'json3',
-            'outtmpl':           video_id,
-            'quiet':             True,
-            'noplaylist':        True,
-        }
-        with yt_dlp.YoutubeDL(ydl_sub_opts) as ydl:
-            ydl.download([url])
+        # ① json3 자막 시도 (실패해도 STT 폴백으로 넘어감)
+        try:
+            ydl_sub_opts = {
+                'skip_download':     True,
+                'writesubtitles':    True,
+                'writeautomaticsub': True,
+                'subtitleslangs':    ['en', 'en-US', 'en-GB'],
+                'subtitlesformat':   'json3',
+                'outtmpl':           video_id,
+                'quiet':             True,
+                'noplaylist':        True,
+            }
+            with yt_dlp.YoutubeDL(ydl_sub_opts) as ydl:
+                ydl.download([url])
+        except Exception:
+            pass  # 429 등 실패해도 STT 폴백으로 계속 진행
 
         json3_file = None
         for fname in os.listdir('.'):
