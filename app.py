@@ -142,25 +142,29 @@ def gemini_batch_translate(texts):
     if not texts:
         return []
     results = []
-    BATCH = 80
+    BATCH = 60
     for i in range(0, len(texts), BATCH):
         chunk  = texts[i:i+BATCH]
-        joined = TRANS_SEP.join(chunk)
+        # 번호 붙여서 보내기 → Gemini가 순서 안 헷갈리고 파싱도 쉬움
+        numbered = '\n'.join(f"{j+1}. {t}" for j, t in enumerate(chunk))
         prompt = (
-            "Translate these English subtitle lines into natural Korean (informal/conversational).\n"
-            "Lines are separated by '|||'. Keep the SAME number of lines in the SAME order.\n"
-            "Preserve tone, humor, nuance. Return ONLY translated lines separated by '|||'.\n\n"
-            + joined
+            f"Translate the following {len(chunk)} English subtitle lines into natural Korean (informal 구어체).\n"
+            "Each line starts with a number. Return ONLY the translated lines with the SAME numbers.\n"
+            "Do NOT add explanations. Preserve tone, humor, nuance.\n\n"
+            + numbered
         )
         try:
-            resp  = stt_model.generate_content(prompt)
-            parts = resp.text.strip().split(TRANS_SEP)
-            if len(parts) == len(chunk):
-                results.extend([p.strip() for p in parts])
-            else:
-                for j, t in enumerate(chunk):
-                    results.append(parts[j].strip() if j < len(parts) else t)
-        except Exception:
+            resp = stt_model.generate_content(prompt)
+            raw  = resp.text.strip()
+            # "1. 번역" 형식으로 파싱
+            import re
+            parsed = {}
+            for m in re.finditer(r'^(\d+)\. (.+)$', raw, re.MULTILINE):
+                parsed[int(m.group(1))] = m.group(2).strip()
+            translated = [parsed.get(j+1, chunk[j]) for j in range(len(chunk))]
+            results.extend(translated)
+        except Exception as e:
+            print(f"[번역 오류] {e}", flush=True)
             results.extend(chunk)
     return results
 
