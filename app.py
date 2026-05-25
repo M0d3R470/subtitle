@@ -31,7 +31,7 @@ def get_subtitles():
     if not OPENAI_API_KEY:
         return jsonify({'error': 'OpenAI API 키가 설정되지 않았습니다. (Secrets를 확인하세요!)'}), 500
 
-    audio_filename = f"{video_id}.m4a"
+    audio_filename = f"{video_id}.webm"
     
     try:
         # [과정 1] 유튜브에서 소리만 다운로드
