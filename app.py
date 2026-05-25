@@ -1,53 +1,36 @@
-import os, json, time, yt_dlp
-from flask import Flask, request, jsonify, send_file
-import google.generativeai as genai
+# ... existing code ...
+        # 3. 자막 원문 추출 (Structured Outputs 스키마 강제 정의)
+        # JSON 포맷 불일치로 인한 파싱 에러를 완벽하게 차단합니다.
+        extraction_schema = {
+            "type": "ARRAY",
+# ... existing code ...
+                "required": ["start", "end", "orig"]
+            }
+        }
 
-app = Flask(__name__)
-genai.configure(api_key=os.environ.get('GOOGLE_API_KEY'))
-model = genai.GenerativeModel('gemini-3-flash-preview')
+        # 오디오 원본 음성 전사 요청
+        trans_res = model.generate_content(
+            [
+                "You are a strict professional transcriber. Transcribe the audio WORD-FOR-WORD. "
+                "DO NOT summarize. DO NOT merge sentences. DO NOT skip any dialogue. "
+                "Output every single spoken sentence sequentially until the end of the audio.",
+                audio_file
+            ],
+            generation_config=types.GenerationConfig(
+                response_mime_type="application/json",
+                response_schema=extraction_schema,
+                temperature=0.1 # 창작(요약)을 억제하기 위해 온도를 0.1로 극한까지 낮춤
+            )
+        )
 
-@app.route('/')
-def index(): return send_file('index.html')
-
-@app.route('/api/subtitles', methods=['GET'])
-def get_subtitles():
-    video_id = request.args.get('video_id')
-    audio_filename = f"{video_id}.m4a"
-    try:
-        # 1. 유튜브 소리 추출
-        ydl_opts = {'format': 'bestaudio[ext=m4a]/140', 'outtmpl': audio_filename, 'quiet': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl: ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
-        
-        audio_file = genai.upload_file(path=audio_filename)
-        while audio_file.state.name == 'PROCESSING': time.sleep(2); audio_file = genai.get_file(audio_file.name)
-            
-        # 2. 자막 원문 추출
-        trans_res = model.generate_content(["Extract subtitles as JSON list of {start, end, orig}.", audio_file])
+        # 안전하게 파싱을 실행합니다 (스키마 강제로 에러 가능성 극단적으로 감소)
         segments = json.loads(trans_res.text)
-        genai.delete_file(audio_file.name); os.remove(audio_filename)
 
-        # 3. 50줄씩 쪼개서 번역 (배열 슬라이싱!)
+        # 4. 번역 연산 최적화 (인덱스 보존형 스키마 적용)
+        # 번역 전후의 리스트 개수 불일치 에러를 원천적으로 방지합니다.
         translated_segments = []
-        chunk_size = 50
-        for i in range(0, len(segments), chunk_size):
-            chunk = segments[i:i + chunk_size]
-            texts = [s['orig'] for s in chunk]
-            
-            prompt = f"다음 문장들을 문맥을 유지하며 자연스러운 한국어로 번역해. JSON 리스트로 답해: {json.dumps(texts)}"
-            trans_res = model.generate_content(prompt)
-            translated_texts = json.loads(trans_res.text)
-            
-            for j, seg in enumerate(chunk):
-                seg['trans'] = translated_texts[j] if j < len(translated_texts) else "번역오류"
-                translated_segments.append(seg)
-            
-        return jsonify(translated_segments)
-    except Exception as e: return jsonify({'error': str(e)}), 500
+        chunk_size = 20 # 50개는 모델이 임의로 문장을 합칠 위험이 크므로 20개로 축소
 
-@app.route('/api/chat', methods=['POST'])
-def chat_with_gemini():
-    data = request.json
-    resp = model.generate_content(f"Explain: {data.get('sentence')}")
-    return jsonify({'explanation': resp.text})
-
-if __name__ == '__main__': app.run(host='0.0.0.0', port=5000)
+        # 번역 결과에 매핑할 완벽한 스키마 정의
+        translation_schema = {
+# ... existing code ...
