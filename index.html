@@ -171,31 +171,20 @@
             chatHistory.appendChild(loadingBubble);
             chatHistory.scrollTop = chatHistory.scrollHeight;
 
-            try {
-                const response = await fetch('/api/chat', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ sentence: sub.orig })
-                });
-                
+           try {
+                const response = await fetch(`/api/subtitles?video_id=${videoId}`);
                 const data = await response.json();
                 
-                chatHistory.removeChild(loadingBubble);
-                const botBubble = document.createElement('div');
-                botBubble.className = 'chat-bubble bot';
-                botBubble.innerHTML = data.explanation || data.error;
-                chatHistory.appendChild(botBubble);
-                chatHistory.scrollTop = chatHistory.scrollHeight;
+                // 💡 핵심: 앵무새 에러를 지우고, 서버가 던진 '진짜 에러'를 그대로 띄웁니다!
+                if (!response.ok) throw new Error(data.error || '자막을 불러오는데 실패했습니다.');
+                if (data.error) throw new Error(data.error);
                 
+                subtitlesData = data;
+                renderSubtitles();
             } catch (e) {
-                chatHistory.removeChild(loadingBubble);
-                const errorBubble = document.createElement('div');
-                errorBubble.className = 'chat-bubble bot';
-                errorBubble.innerHTML = '앗, 서버와 연결에 문제가 생겼어요. 다시 눌러주세요!';
-                chatHistory.appendChild(errorBubble);
-                chatHistory.scrollTop = chatHistory.scrollHeight;
+                // 화면에 진짜 에러 원인이 빨간 글씨로 뜹니다.
+                box.innerHTML = `<div style="text-align:center; padding:50px; color:#ff4757;">앗! 에러가 발생했어요.<br><br><b>${e.message}</b></div>`;
             }
-        }
 
         function onPlayerStateChange(event) {
             if (event.data == YT.PlayerState.PLAYING) {
