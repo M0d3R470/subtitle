@@ -1,18 +1,18 @@
 import os
 import json
+import time  # 💡 기다림을 위한 시간 마법사 추가!
 import yt_dlp
 from flask import Flask, request, jsonify, send_file
 import google.generativeai as genai
-from google.generativeai import types  # 최신 엄격한 데이터 규격용 모듈
+from google.generativeai import types
 from deep_translator import GoogleTranslator
 
 app = Flask(__name__)
 
-# 1. 제미나이 3.0 최신 버전 설정
+# 1. 제미나이 설정
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 if GOOGLE_API_KEY:
     genai.configure(api_key=GOOGLE_API_KEY)
-    # 음성 인식은 미친 속도의 'gemini-3.0-flash', 해설은 튜터용 최고 성능인 'gemini-3.0-pro'로 세팅!
     stt_model = genai.GenerativeModel('gemini-3-flash-preview') 
     tutor_model = genai.GenerativeModel('gemini-3.1-pro-preview')
 
@@ -30,6 +30,7 @@ def get_subtitles():
         return jsonify({'error': 'Gemini API 키가 설정되지 않았습니다.'}), 500
 
     audio_filename = f"{video_id}.webm"
+    uploaded_file = None # 에러 처리를 위한 초기화
     
     try:
         # [과정 1] 유튜브에서 소리만 다운로드
@@ -44,9 +45,16 @@ def get_subtitles():
         # [과정 2] 구글 서버에 오디오 업로드
         uploaded_file = genai.upload_file(path=audio_filename)
         
+        # 💡 핵심 추가: 구글 서버가 오디오를 완벽하게 인식(ACTIVE)할 때까지 2초마다 확인하며 기다립니다.
+        while uploaded_file.state.name == 'PROCESSING':
+            time.sleep(2)
+            uploaded_file = genai.get_file(uploaded_file.name)
+            
+        if uploaded_file.state.name == 'FAILED':
+            raise Exception("구글 서버가 오디오 파일을 처리하는 데 실패했습니다.")
+        
         prompt = "Listen to this audio and transcribe it accurately with exact start and end timestamps."
         
-        # 💡 Gemini 3.0의 핵심 기능: 자막 데이터 규격을 억까당하지 않게 딱 고정합니다.
         json_schema = {
             "type": "array",
             "items": {
@@ -60,7 +68,7 @@ def get_subtitles():
             }
         }
         
-        # 3.0 플래시가 오디오를 듣고 지정된 JSON 형식으로 완벽하게 출력합니다.
+        # 플래시가 오디오를 듣고 지정된 JSON 형식으로 완벽하게 출력합니다.
         response = stt_model.generate_content(
             [prompt, uploaded_file],
             generation_config=types.GenerationConfig(
@@ -69,11 +77,6 @@ def get_subtitles():
             )
         )
         
-        # 파일 청소
-        genai.delete_file(uploaded_file.name)
-        if os.path.exists(audio_filename):
-            os.remove(audio_filename)
-
         # 안전하게 데이터 변환
         segments = json.loads(response.text)
 
@@ -96,35 +99,24 @@ def get_subtitles():
                     'trans': translated_text
                 })
                 
+        # 모든 작업이 끝나면 구글 서버에 올렸던 파일과 렌더 서버의 파일을 청소합니다.
+        if uploaded_file:
+            genai.delete_file(uploaded_file.name)
+        if os.path.exists(audio_filename):
+            os.remove(audio_filename)
+            
         return jsonify(merged_subtitles)
         
     except Exception as e:
+        # 에러가 났을 때도 찌꺼기가 남지 않게 청소합니다.
+        if uploaded_file:
+            try:
+                genai.delete_file(uploaded_file.name)
+            except:
+                pass
         if os.path.exists(audio_filename):
             os.remove(audio_filename)
-        return jsonify({'error': f'제미나이 3.0 음성 인식 오류: {str(e)}'}), 500
+            
+        return jsonify({'error': f'제미나이 음성 인식 오류: {str(e)}'}), 500
 
-@app.route('/api/chat', methods=['POST'])
-def chat_with_gemini():
-    data = request.json
-    sentence = data.get('sentence', '')
-    
-    prompt = f"""
-    당신은 친절한 언어 튜터입니다. 다음 문장에 대해 한국어로 친절하게 해설해줘. 
-    문장: "{sentence}"
-    
-    조건:
-    1. 문장 구조 해설 (주어, 동사, 핵심 문법 등)
-    2. 중요 표현이나 단어 설명
-    3. 동생에게 알려주듯 다정하고 친근한 말투 사용
-    4. 가독성을 위해 HTML 태그(<strong>, <br> 등)를 적절히 사용해서 예쁘게 꾸며줘.
-    """
-    try:
-        if not GOOGLE_API_KEY:
-            return jsonify({'error': 'Gemini API 키가 설정되지 않았습니다.'}), 500
-        response = tutor_model.generate_content(prompt)
-        return jsonify({'explanation': response.text})
-    except Exception as e:
-        return jsonify({'error': 'AI 응답 오류가 발생했습니다.'}), 500
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+@app.route('/api/
