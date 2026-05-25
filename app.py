@@ -12,7 +12,6 @@ from typing import List
 
 app = Flask(__name__)
 
-# ── 환경변수 체크 ─────────────────────────────────────────
 GOOGLE_API_KEY = os.environ.get('GOOGLE_API_KEY')
 if not GOOGLE_API_KEY:
     raise RuntimeError("GOOGLE_API_KEY 환경변수가 설정되지 않았습니다.")
@@ -21,14 +20,12 @@ genai.configure(api_key=GOOGLE_API_KEY)
 stt_model   = genai.GenerativeModel('gemini-2.5-flash')
 tutor_model = genai.GenerativeModel('gemini-2.5-flash')
 
-# ── Pydantic 스키마 ───────────────────────────────────────
 class Segment(BaseModel):
     start: float
     end:   float
     orig:  str
     trans: str
 
-# ── 상수 ─────────────────────────────────────────────────
 CHUNK_SEC     = 30
 MIN_WORDS     = 4
 MAX_WORDS     = 18
@@ -36,7 +33,7 @@ MAX_GAP_SEC   = 1.5
 SENTENCE_ENDS = {'.', '!', '?', '...'}
 
 
-# ── 유틸: 파일 안전 삭제 ─────────────────────────────────
+# ── 파일 삭제 ─────────────────────────────────────────────
 def safe_delete_local(path):
     try:
         if path and os.path.exists(path):
@@ -52,33 +49,29 @@ def safe_delete_remote(uf):
         pass
 
 
-# ── 유틸: Gemini 파일 ACTIVE 대기 ────────────────────────
+# ── Gemini 파일 대기 ──────────────────────────────────────
 def wait_until_active(uf, timeout=120):
     deadline = time.time() + timeout
     while True:
-        info  = genai.get_file(uf.name)
-        state = info.state.name
+        state = genai.get_file(uf.name).state.name
         if state == 'ACTIVE':
             return
         if state == 'FAILED':
-            raise RuntimeError("구글 서버가 오디오 처리에 실패했습니다.")
+            raise RuntimeError("구글 서버 오디오 처리 실패.")
         if time.time() > deadline:
             raise TimeoutError("구글 서버 대기 시간 초과.")
         time.sleep(2)
 
 
-# ── 유틸: 세그먼트 병합 / 분할 ───────────────────────────
+# ── 세그먼트 병합/분할 ────────────────────────────────────
 def _split_long_segment(seg):
     words = seg['orig'].split()
     if len(words) <= MAX_WORDS:
         return [seg]
-
-    chunks_orig = []
-    buf = []
+    chunks_orig, buf = [], []
     for word in words:
         buf.append(word)
-        stripped = word.rstrip('"\'\u2019')
-        if any(stripped.endswith(e) for e in SENTENCE_ENDS) and len(buf) >= MIN_WORDS:
+        if any(word.rstrip('"\'\u2019').endswith(e) for e in SENTENCE_ENDS) and len(buf) >= MIN_WORDS:
             chunks_orig.append(' '.join(buf))
             buf = []
     if buf:
@@ -86,41 +79,25 @@ def _split_long_segment(seg):
             chunks_orig[-1] += ' ' + ' '.join(buf)
         else:
             chunks_orig.append(' '.join(buf))
-
-    trans_words = seg.get('trans', '').split()
-    n           = len(chunks_orig)
-    chunk_size  = max(1, len(trans_words) // n)
-    chunks_trans = []
-    for i in range(n):
-        s = i * chunk_size
-        e = s + chunk_size if i < n - 1 else len(trans_words)
-        chunks_trans.append(' '.join(trans_words[s:e]))
-
-    total_dur   = seg['end'] - seg['start']
-    total_words = max(1, sum(len(c.split()) for c in chunks_orig))
-    result      = []
-    cursor      = seg['start']
+    trans_words  = seg.get('trans', '').split()
+    n            = len(chunks_orig)
+    chunk_size   = max(1, len(trans_words) // n)
+    chunks_trans = [' '.join(trans_words[i*chunk_size : (i+1)*chunk_size if i<n-1 else len(trans_words)]) for i in range(n)]
+    total_dur    = seg['end'] - seg['start']
+    total_w      = max(1, sum(len(c.split()) for c in chunks_orig))
+    result, cur  = [], seg['start']
     for o, t in zip(chunks_orig, chunks_trans):
-        dur = total_dur * len(o.split()) / total_words
-        result.append({
-            'start': round(cursor, 3),
-            'end':   round(cursor + dur, 3),
-            'orig':  o.strip(),
-            'trans': t.strip(),
-        })
-        cursor += dur
+        dur = total_dur * len(o.split()) / total_w
+        result.append({'start': round(cur,3), 'end': round(cur+dur,3), 'orig': o.strip(), 'trans': t.strip()})
+        cur += dur
     return result
-
 
 def merge_short_segments(segments):
     if not segments:
         return []
-    merged = []
-    buf = dict(segments[0])
+    merged, buf = [], dict(segments[0])
     for seg in segments[1:]:
-        gap        = seg['start'] - buf['end']
-        word_count = len(buf['orig'].split())
-        if word_count < MIN_WORDS and gap <= MAX_GAP_SEC:
+        if len(buf['orig'].split()) < MIN_WORDS and seg['start'] - buf['end'] <= MAX_GAP_SEC:
             buf['orig']  += ' ' + seg['orig']
             buf['trans'] += ' ' + seg.get('trans', '')
             buf['end']    = seg['end']
@@ -128,99 +105,74 @@ def merge_short_segments(segments):
             merged.append(buf)
             buf = dict(seg)
     merged.append(buf)
-
     result = []
     for seg in merged:
         result.extend(_split_long_segment(seg))
     return result
 
 
-# ── 유틸: VTT 파싱 ───────────────────────────────────────
-def _vtt_time_to_sec(t):
-    parts = t.strip().split(':')
-    if len(parts) == 3:
-        h, m, s = parts
-    else:
-        h, m, s = 0, parts[0], parts[1]
-    return int(h) * 3600 + int(m) * 60 + float(s.replace(',', '.'))
-
-def parse_vtt(filepath):
+# ── json3 자막 파싱 ───────────────────────────────────────
+def parse_json3(filepath):
     with open(filepath, 'r', encoding='utf-8') as f:
-        text = f.read()
+        data = json.load(f)
 
-    blocks = re.split(r'\n\n+', text.strip())
-    raw = []
-    for block in blocks:
-        lines   = block.strip().splitlines()
-        ts_line = None
-        text_lines = []
-        for line in lines:
-            if '-->' in line:
-                ts_line = line.split('align:')[0].strip()
-            elif ts_line and line.strip() and not re.match(r'^\d+$', line.strip()) and line.strip() != 'WEBVTT':
-                clean = re.sub(r'<[^>]+>', '', line).strip()
-                clean = re.sub(r'&nbsp;', ' ', clean).strip()
-                if clean:
-                    text_lines.append(clean)
-        if not ts_line or not text_lines:
+    segments = []
+    for ev in data.get('events', []):
+        start_ms = ev.get('tStartMs', 0)
+        dur_ms   = ev.get('dDurationMs', 0)
+        text     = ''.join(s.get('utf8', '') for s in ev.get('segs', [])).strip()
+        text     = re.sub(r'\s+', ' ', text).strip()
+        if not text:
             continue
-        try:
-            start = _vtt_time_to_sec(ts_line.split('-->')[0].strip())
-            end   = _vtt_time_to_sec(ts_line.split('-->')[1].strip())
-        except Exception:
-            continue
-        orig = ' '.join(text_lines)
-        raw.append((start, end, orig))
+        segments.append({
+            'start': round(start_ms / 1000, 3),
+            'end':   round((start_ms + dur_ms) / 1000, 3),
+            'orig':  text,
+            'trans': ''
+        })
 
-    if not raw:
-        return []
-
-    # 슬라이딩 윈도우 중복 제거
-    segments  = []
-    prev_text = ''
-    for start, end, orig in raw:
-        if orig == prev_text:
-            continue
-        if orig.startswith(prev_text) and prev_text:
-            new_part = orig[len(prev_text):].strip()
-            if new_part:
-                if segments:
-                    segments[-1]['end'] = start
-                segments.append({'start': start, 'end': end, 'orig': new_part, 'trans': ''})
-        else:
-            segments.append({'start': start, 'end': end, 'orig': orig, 'trans': ''})
-        prev_text = orig
-
-    return segments
+    # 연속 중복 제거
+    deduped, prev = [], ''
+    for seg in segments:
+        if seg['orig'] != prev:
+            deduped.append(seg)
+            prev = seg['orig']
+    return deduped
 
 
-# ── 유틸: Gemini 번역 (VTT 경로용) ──────────────────────
+# ── Gemini 번역 (자막용) ──────────────────────────────────
 TRANS_SEP = '\n|||\n'
 
 def gemini_batch_translate(texts):
     if not texts:
         return []
-    joined = TRANS_SEP.join(texts)
-    prompt = (
-        "Translate these English subtitle lines into natural Korean (구어체).\n"
-        "Lines are separated by '|||'. Keep the SAME number of lines in the SAME order.\n"
-        "Preserve tone, humor, nuance. Return ONLY translated lines separated by '|||'.\n\n"
-        + joined
-    )
-    try:
-        resp  = stt_model.generate_content(prompt)
-        parts = resp.text.strip().split(TRANS_SEP)
-        if len(parts) == len(texts):
-            return [p.strip() for p in parts]
-        result = []
-        for i, t in enumerate(texts):
-            result.append(parts[i].strip() if i < len(parts) else t)
-        return result
-    except Exception:
-        return texts
+    # 한 번에 너무 많으면 나눠서 처리
+    BATCH = 80
+    results = []
+    for i in range(0, len(texts), BATCH):
+        chunk = texts[i:i+BATCH]
+        joined = TRANS_SEP.join(chunk)
+        prompt = (
+            "Translate these English subtitle lines into natural Korean (informal/conversational).\n"
+            "Lines are separated by '|||'. Keep the SAME number of lines in the SAME order.\n"
+            "Preserve tone, humor, nuance. Return ONLY translated lines separated by '|||'.\n\n"
+            + joined
+        )
+        try:
+            resp  = stt_model.generate_content(prompt)
+            parts = resp.text.strip().split(TRANS_SEP)
+            if len(parts) == len(chunk):
+                results.extend([p.strip() for p in parts])
+            else:
+                # 수 안 맞으면 원문으로
+                for j, t in enumerate(chunk):
+                    results.append(parts[j].strip() if j < len(parts) else t)
+        except Exception:
+            results.extend(chunk)
+    return results
 
 
-# ── 유틸: yt-dlp 청크 다운로드 ───────────────────────────
+# ── yt-dlp 청크 다운로드 (STT 폴백용) ────────────────────
 def get_video_duration(video_id):
     opts = {'quiet': True, 'skip_download': True, 'noplaylist': True}
     with yt_dlp.YoutubeDL(opts) as ydl:
@@ -231,10 +183,9 @@ def download_chunks(video_id):
     duration = get_video_duration(video_id)
     if duration <= 0:
         return []
-    n_chunks = math.ceil(duration / CHUNK_SEC)
-    url      = f"https://www.youtube.com/watch?v={video_id}"
-    chunks   = []
-    for i in range(n_chunks):
+    url    = f"https://www.youtube.com/watch?v={video_id}"
+    chunks = []
+    for i in range(math.ceil(duration / CHUNK_SEC)):
         start = i * CHUNK_SEC
         end   = min(start + CHUNK_SEC, duration)
         out   = f"{video_id}_chunk{i:03d}.m4a"
@@ -253,21 +204,18 @@ def download_chunks(video_id):
             chunks.append((out, start))
     return chunks
 
-
-# ── 유틸: 청크 STT ───────────────────────────────────────
 def transcribe_chunk(audio_path, offset):
     uf = genai.upload_file(path=audio_path, mime_type='audio/mp4')
     wait_until_active(uf)
     prompt = (
         "You are a professional subtitle transcriber and translator.\n"
         "Listen to this audio clip and produce subtitles. For each segment:\n"
-        "- Transcribe exact spoken words into 'orig'\n"
-        "- Translate naturally into Korean (informal/conversational) into 'trans'\n"
-        "- Each segment = one full sentence or natural phrase (min 4-5 words)\n"
+        "- 'orig': exact spoken words\n"
+        "- 'trans': natural Korean translation (informal/conversational)\n"
+        "- Each segment = one full sentence or phrase (min 4-5 words)\n"
         "- Do NOT split single words into separate segments\n"
-        "- Timestamps are relative to the START of this clip (start from 0)\n"
-        "- Be as precise as possible with timestamps\n"
-        "- Preserve tone, humor, sarcasm; localize idioms naturally"
+        "- Timestamps are relative to the START of this clip (from 0)\n"
+        "- Preserve tone, humor, sarcasm; localize idioms"
     )
     try:
         resp = stt_model.generate_content(
@@ -284,25 +232,21 @@ def transcribe_chunk(audio_path, offset):
             raw = raw.split('```')[1]
             if raw.startswith('json'):
                 raw = raw[4:]
-            raw = raw.strip()
-        segs = json.loads(raw)
+        segs = json.loads(raw.strip())
     except Exception:
         return []
     finally:
         safe_delete_remote(uf)
 
-    result = []
-    for seg in segs:
-        orig = (seg.get('orig') or '').strip()
-        if not orig:
-            continue
-        result.append({
-            'start': round(float(seg.get('start', 0)) + offset, 3),
-            'end':   round(float(seg.get('end',   0)) + offset, 3),
-            'orig':  orig,
-            'trans': (seg.get('trans') or '').strip(),
-        })
-    return result
+    return [
+        {
+            'start': round(float(s.get('start', 0)) + offset, 3),
+            'end':   round(float(s.get('end',   0)) + offset, 3),
+            'orig':  (s.get('orig') or '').strip(),
+            'trans': (s.get('trans') or '').strip(),
+        }
+        for s in segs if (s.get('orig') or '').strip()
+    ]
 
 
 # ── 라우트 ───────────────────────────────────────────────
@@ -320,13 +264,13 @@ def get_subtitles():
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     try:
-        # ① 유튜브 자막 시도
+        # ① json3 자막 시도
         ydl_sub_opts = {
             'skip_download':     True,
             'writesubtitles':    True,
             'writeautomaticsub': True,
             'subtitleslangs':    ['en', 'en-US', 'en-GB'],
-            'subtitlesformat':   'vtt',
+            'subtitlesformat':   'json3',
             'outtmpl':           video_id,
             'quiet':             True,
             'noplaylist':        True,
@@ -334,15 +278,16 @@ def get_subtitles():
         with yt_dlp.YoutubeDL(ydl_sub_opts) as ydl:
             ydl.download([url])
 
-        vtt_file = None
+        json3_file = None
         for fname in os.listdir('.'):
-            if fname.startswith(video_id) and fname.endswith('.vtt'):
-                vtt_file = fname
+            if fname.startswith(video_id) and fname.endswith('.json3'):
+                json3_file = fname
                 break
 
-        if vtt_file:
-            segments = parse_vtt(vtt_file)
-            safe_delete_local(vtt_file)
+        if json3_file:
+            segments = parse_json3(json3_file)
+            safe_delete_local(json3_file)
+
             if segments:
                 segments = merge_short_segments(segments)
                 originals    = [s['orig'] for s in segments]
@@ -368,17 +313,15 @@ def get_subtitles():
             raise RuntimeError("음성 인식 결과가 없습니다.")
 
         all_segments = merge_short_segments(all_segments)
-        result = [
+        return jsonify([
             {'start': s['start'], 'end': s['end'], 'orig': s['orig'], 'trans': s['trans']}
             for s in all_segments
-        ]
-        return jsonify(result)
+        ])
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
     finally:
-        # 남은 임시 파일 정리
         for fname in list(os.listdir('.')):
             if fname.startswith(video_id):
                 safe_delete_local(fname)
@@ -409,7 +352,6 @@ def chat_with_gemini():
         return jsonify({'error': f'AI 응답 오류: {str(e)}'}), 500
 
 
-# ── 전역 에러 핸들러 ─────────────────────────────────────
 @app.errorhandler(404)
 def not_found(e):
     return jsonify({'error': '404 - 경로를 찾을 수 없습니다.'}), 404
