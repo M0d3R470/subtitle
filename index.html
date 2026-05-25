@@ -149,7 +149,7 @@
                 `;
                 textGroup.onclick = () => {
                     if (player && player.seekTo) {
-                        player.seekTo(sub.start);
+                        player.seekTo(sub.start, true); // true = allowSeekAhead, 버퍼 밖도 이동 가능
                         player.playVideo();
                     }
                 };
