@@ -1,6 +1,6 @@
 import os
 import json
-import time  # 💡 기다림을 위한 시간 마법사 추가!
+import time  
 import yt_dlp
 from flask import Flask, request, jsonify, send_file
 import google.generativeai as genai
@@ -30,7 +30,7 @@ def get_subtitles():
         return jsonify({'error': 'Gemini API 키가 설정되지 않았습니다.'}), 500
 
     audio_filename = f"{video_id}.webm"
-    uploaded_file = None # 에러 처리를 위한 초기화
+    uploaded_file = None 
     
     try:
         # [과정 1] 유튜브에서 소리만 다운로드
@@ -45,14 +45,26 @@ def get_subtitles():
         # [과정 2] 구글 서버에 오디오 업로드
         uploaded_file = genai.upload_file(path=audio_filename)
         
-        # 💡 핵심 추가: 구글 서버가 오디오를 완벽하게 인식(ACTIVE)할 때까지 2초마다 확인하며 기다립니다.
-        while uploaded_file.state.name == 'PROCESSING':
-            time.sleep(2)
-            uploaded_file = genai.get_file(uploaded_file.name)
-            
-        if uploaded_file.state.name == 'FAILED':
-            raise Exception("구글 서버가 오디오 파일을 처리하는 데 실패했습니다.")
+        # 🔥 얄짤없는 '무조건 대기' 로직 (ACTIVE가 될 때까지 못 지나감)
+        timeout = 120 # 최대 60초 대기
+        start_time = time.time()
         
+        while True:
+            file_info = genai.get_file(uploaded_file.name)
+            
+            # 1. 소화 완료! (가장 원하던 상태)
+            if file_info.state.name == 'ACTIVE':
+                break
+            # 2. 에러 발생 (구글 서버 뻗음)
+            elif file_info.state.name == 'FAILED':
+                raise Exception("구글 서버가 오디오 파일을 처리하는 데 실패했습니다.")
+            
+            # 3. 60초가 넘어가면 무한루프 방지
+            if time.time() - start_time > timeout:
+                raise Exception("구글 서버 대기 시간이 초과되었습니다.")
+                
+            time.sleep(2) # 2초 쉬고 다시 확인
+            
         prompt = "Listen to this audio and transcribe it accurately with exact start and end timestamps."
         
         json_schema = {
@@ -99,7 +111,7 @@ def get_subtitles():
                     'trans': translated_text
                 })
                 
-        # 모든 작업이 끝나면 구글 서버에 올렸던 파일과 렌더 서버의 파일을 청소합니다.
+        # 청소 로직
         if uploaded_file:
             genai.delete_file(uploaded_file.name)
         if os.path.exists(audio_filename):
@@ -108,7 +120,6 @@ def get_subtitles():
         return jsonify(merged_subtitles)
         
     except Exception as e:
-        # 에러가 났을 때도 찌꺼기가 남지 않게 청소합니다.
         if uploaded_file:
             try:
                 genai.delete_file(uploaded_file.name)
@@ -119,4 +130,28 @@ def get_subtitles():
             
         return jsonify({'error': f'제미나이 음성 인식 오류: {str(e)}'}), 500
 
-@app.route('/api/
+@app.route('/api/chat', methods=['POST'])
+def chat_with_gemini():
+    data = request.json
+    sentence = data.get('sentence', '')
+    
+    prompt = f"""
+    당신은 친절한 언어 튜터입니다. 다음 문장에 대해 한국어로 친절하게 해설해줘. 
+    문장: "{sentence}"
+    
+    조건:
+    1. 문장 구조 해설 (주어, 동사, 핵심 문법 등)
+    2. 중요 표현이나 단어 설명
+    3. 동생에게 알려주듯 다정하고 친근한 말투 사용
+    4. 가독성을 위해 HTML 태그(<strong>, <br> 등)를 적절히 사용해서 예쁘게 꾸며줘.
+    """
+    try:
+        if not GOOGLE_API_KEY:
+            return jsonify({'error': 'Gemini API 키가 설정되지 않았습니다.'}), 500
+        response = tutor_model.generate_content(prompt)
+        return jsonify({'explanation': response.text})
+    except Exception as e:
+        return jsonify({'error': 'AI 응답 오류가 발생했습니다.'}), 500
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
