@@ -1,0 +1,6 @@
+flask
+yt-dlp
+google-generativeai
+openai
+deep-translator
+gunicorn
