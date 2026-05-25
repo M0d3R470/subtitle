@@ -29,41 +29,40 @@ def get_subtitles():
     if not GOOGLE_API_KEY:
         return jsonify({'error': 'Gemini API 키가 설정되지 않았습니다.'}), 500
 
-    audio_filename = f"{video_id}.webm"
+    # 💡 제미나이가 좋아하는 m4a 포맷으로 변경!
+    audio_filename = f"{video_id}.m4a"
     uploaded_file = None 
     
     try:
-        # [과정 1] 유튜브에서 소리만 다운로드
+        # [과정 1] 유튜브에서 m4a 형식의 소리만 쏙 빼오기
         ydl_opts = {
-            'format': 'bestaudio[ext=webm]/bestaudio',
+            'format': 'bestaudio[ext=m4a]/140/bestaudio', # m4a 우선 다운로드 강제
             'outtmpl': audio_filename,
-            'quiet': True
+            'quiet': True,
+            'noplaylist': True
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
 
-        # [과정 2] 구글 서버에 오디오 업로드
-        uploaded_file = genai.upload_file(path=audio_filename)
+        # [과정 2] 구글 서버에 오디오 업로드 (mime_type 명시)
+        uploaded_file = genai.upload_file(path=audio_filename, mime_type="audio/mp4")
         
-        # 🔥 얄짤없는 '무조건 대기' 로직 (ACTIVE가 될 때까지 못 지나감)
-        timeout = 120 # 최대 60초 대기
+        # ACTIVE가 될 때까지 대기
+        timeout = 60 
         start_time = time.time()
         
         while True:
             file_info = genai.get_file(uploaded_file.name)
             
-            # 1. 소화 완료! (가장 원하던 상태)
             if file_info.state.name == 'ACTIVE':
                 break
-            # 2. 에러 발생 (구글 서버 뻗음)
             elif file_info.state.name == 'FAILED':
-                raise Exception("구글 서버가 오디오 파일을 처리하는 데 실패했습니다.")
+                raise Exception("구글 서버가 이 오디오 형식을 처리하는 데 실패했습니다.")
             
-            # 3. 60초가 넘어가면 무한루프 방지
             if time.time() - start_time > timeout:
                 raise Exception("구글 서버 대기 시간이 초과되었습니다.")
                 
-            time.sleep(2) # 2초 쉬고 다시 확인
+            time.sleep(2)
             
         prompt = "Listen to this audio and transcribe it accurately with exact start and end timestamps."
         
@@ -80,7 +79,7 @@ def get_subtitles():
             }
         }
         
-        # 플래시가 오디오를 듣고 지정된 JSON 형식으로 완벽하게 출력합니다.
+        # 제미나이 플래시 모델로 분석
         response = stt_model.generate_content(
             [prompt, uploaded_file],
             generation_config=types.GenerationConfig(
@@ -89,10 +88,10 @@ def get_subtitles():
             )
         )
         
-        # 안전하게 데이터 변환
+        # 데이터 변환
         segments = json.loads(response.text)
 
-        # [과정 3] 다국어 원문을 한국어로 실시간 번역
+        # [과정 3] 번역
         merged_subtitles = []
         translator = GoogleTranslator(source='auto', target='ko')
         
@@ -126,7 +125,10 @@ def get_subtitles():
             except:
                 pass
         if os.path.exists(audio_filename):
-            os.remove(audio_filename)
+            try:
+                os.remove(audio_filename)
+            except:
+                pass
             
         return jsonify({'error': f'제미나이 음성 인식 오류: {str(e)}'}), 500
 
