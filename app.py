@@ -225,7 +225,7 @@ def chat_with_gemini():
 조건:
 1. 문장 구조 해설 (주어, 동사, 핵심 문법 등)
 2. 중요 표현·단어 설명
-3. 정중한 한국어 존댓말 사용
+3. 친절한 한국어 존댓말 사용
 """
 
     try:
@@ -233,6 +233,24 @@ def chat_with_gemini():
         return jsonify({'explanation': response.text})
     except Exception as e:
         return jsonify({'error': f'AI 응답 오류: {str(e)}'}), 500
+
+
+# ── 전역 에러 핸들러 (Flask HTML 에러페이지 대신 JSON 반환) ──
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({'error': '404 - 요청한 경로를 찾을 수 없습니다.'}), 404
+
+@app.errorhandler(405)
+def method_not_allowed(e):
+    return jsonify({'error': '405 - 허용되지 않는 메서드입니다.'}), 405
+
+@app.errorhandler(500)
+def internal_error(e):
+    return jsonify({'error': f'500 - 서버 내부 오류: {str(e)}'}), 500
+
+@app.errorhandler(Exception)
+def unhandled_exception(e):
+    return jsonify({'error': f'예상치 못한 오류: {str(e)}'}), 500
 
 
 if __name__ == '__main__':
