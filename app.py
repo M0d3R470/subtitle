@@ -83,10 +83,14 @@ def merge_all(segments):
     return words_with_ts
 
 
-def gemini_sentence_split(words_with_ts):
+class SentenceSegment(BaseModel):
+    orig:  str
+    trans: str
+
+def gemini_split_and_translate(words_with_ts):
     """
-    Gemini에게 전체 텍스트를 주고 문장 경계 인덱스를 반환받아
-    단어 타임스탬프 기준으로 자막 세그먼트를 만듦.
+    Gemini에게 전체 텍스트를 주고 문장 분리 + 번역을 한 번에 처리.
+    단어 타임스탬프 기준으로 자막 세그먼트를 만들어 반환.
     """
     if not words_with_ts:
         return []
@@ -94,19 +98,27 @@ def gemini_sentence_split(words_with_ts):
     full_text = ' '.join(w['word'] for w in words_with_ts)
 
     prompt = (
-        "You are a subtitle editor. Split the following transcript into natural subtitle segments.\n"
+        "You are a professional subtitle editor and translator.\n"
+        "Split the transcript into natural subtitle segments AND translate each into Korean.\n"
         "Rules:\n"
         "- Each segment = one complete sentence or natural spoken clause\n"
-        "- Split at sentence boundaries based on MEANING and GRAMMAR, not just punctuation\n"
-        "- Each segment should be 5-15 words ideally\n"
-        "- Return ONLY a JSON array of strings, each string being one subtitle segment\n"
-        "- Do NOT translate. Keep the original English.\n\n"
+        "- Split based on MEANING and GRAMMAR, not just punctuation\n"
+        "- Each segment ideally 5-15 words\n"
+        "- 'orig': original English segment\n"
+        "- 'trans': natural Korean translation (informal 구어체)\n"
+        "- Preserve tone, humor, sarcasm; localize idioms\n\n"
         f"Transcript: {full_text}"
     )
 
     try:
-        resp     = stt_model.generate_content(prompt)
-        raw      = (resp.text or '').strip()
+        resp = stt_model.generate_content(
+            prompt,
+            generation_config=types.GenerationConfig(
+                response_mime_type='application/json',
+                response_schema=list[SentenceSegment],
+            ),
+        )
+        raw = (resp.text or '').strip()
         if raw.startswith('```'):
             raw = raw.split('```')[1]
             if raw.startswith('json'):
@@ -116,17 +128,19 @@ def gemini_sentence_split(words_with_ts):
         if not isinstance(sentences, list):
             raise ValueError("not a list")
     except Exception as e:
-        print(f"[문장분리 오류] {e}", flush=True)
-        # 폴백: 문장부호 기준으로 단순 분리
-        sentences = re.split(r'(?<=[.!?])\s+', full_text)
+        print(f"[문장분리+번역 오류] {e}", flush=True)
+        # 폴백: 문장부호 기준 단순 분리, 번역 없음
+        sentences = [{'orig': s.strip(), 'trans': ''} for s in re.split(r'(?<=[.!?])\s+', full_text) if s.strip()]
 
     # 각 문장을 단어 타임스탬프에 매핑
     result   = []
     word_idx = 0
     total    = len(words_with_ts)
 
-    for sentence in sentences:
-        s_words = sentence.strip().split()
+    for seg in sentences:
+        orig    = (seg.get('orig') or '').strip()
+        trans   = (seg.get('trans') or '').strip()
+        s_words = orig.split()
         if not s_words or word_idx >= total:
             continue
 
@@ -137,8 +151,8 @@ def gemini_sentence_split(words_with_ts):
         result.append({
             'start': seg_start,
             'end':   seg_end,
-            'orig':  sentence.strip(),
-            'trans': ''
+            'orig':  orig,
+            'trans': trans,
         })
         word_idx += len(s_words)
 
@@ -304,24 +318,20 @@ def get_subtitles():
             segments = parse_json3(json3_file)
             safe_delete_local(json3_file)
             if segments:
-                # 단어 단위 타임스탬프 보존하며 합치기
                 words_with_ts = merge_all(segments)
-                # Gemini가 문맥 보고 문장 단위로 분리
-                segments      = gemini_sentence_split(words_with_ts)
-                # 번역
-                translations  = gemini_batch_translate([s['orig'] for s in segments])
+                segments      = gemini_split_and_translate(words_with_ts)
                 return jsonify([
-                    {'start': s['start'], 'end': s['end'], 'orig': s['orig'], 'trans': t}
-                    for s, t in zip(segments, translations)
+                    {'start': s['start'], 'end': s['end'], 'orig': s['orig'], 'trans': s['trans']}
+                    for s in segments
                 ])
 
         # ② 자막 없으면 Gemini STT 폴백
         all_segments = transcribe_full(video_id)
         if not all_segments:
             raise RuntimeError("음성 인식 결과가 없습니다.")
-        all_segments = gemini_sentence_split(merge_all(all_segments))
+        all_segments = gemini_split_and_translate(merge_all(all_segments))
         return jsonify([
-            {'start': s['start'], 'end': s['end'], 'orig': s['orig'], 'trans': s['trans']}
+            {'start': s['start'], 'end': s['end'], 'orig': s['orig'], 'trans': s.get('trans', '')}
             for s in all_segments
         ])
 
