@@ -62,54 +62,86 @@ def wait_until_active(uf, timeout=120):
         time.sleep(2)
 
 
-# ── 세그먼트 병합/분할 ────────────────────────────────────
-def _split_long_segment(seg):
-    words = seg['orig'].split()
-    if len(words) <= MAX_WORDS:
-        return [seg]
-    chunks_orig, buf = [], []
-    for word in words:
-        buf.append(word)
-        if any(word.rstrip('"\'\u2019').endswith(e) for e in SENTENCE_ENDS) and len(buf) >= MIN_WORDS:
-            chunks_orig.append(' '.join(buf))
-            buf = []
-    if buf:
-        if chunks_orig:
-            chunks_orig[-1] += ' ' + ' '.join(buf)
-        else:
-            chunks_orig.append(' '.join(buf))
-    trans_words = seg.get('trans', '').split()
-    n = len(chunks_orig)
-    chunk_size = max(1, len(trans_words) // n)
-    chunks_trans = [
-        ' '.join(trans_words[i*chunk_size : (i+1)*chunk_size if i < n-1 else len(trans_words)])
-        for i in range(n)
-    ]
-    total_dur = seg['end'] - seg['start']
-    total_w   = max(1, sum(len(c.split()) for c in chunks_orig))
-    result, cur = [], seg['start']
-    for o, t in zip(chunks_orig, chunks_trans):
-        dur = total_dur * len(o.split()) / total_w
-        result.append({'start': round(cur,3), 'end': round(cur+dur,3), 'orig': o.strip(), 'trans': t.strip()})
-        cur += dur
-    return result
-
-def merge_short_segments(segments):
+# ── 세그먼트 병합: 일단 전체 텍스트로 합치기 ───────────────
+def merge_all(segments):
+    """json3 단어 단위 세그먼트를 타임스탬프와 함께 보존하며 합침."""
     if not segments:
         return []
-    merged, buf = [], dict(segments[0])
-    for seg in segments[1:]:
-        if len(buf['orig'].split()) < MIN_WORDS and seg['start'] - buf['end'] <= MAX_GAP_SEC:
-            buf['orig']  += ' ' + seg['orig']
-            buf['trans'] += ' ' + seg.get('trans', '')
-            buf['end']    = seg['end']
-        else:
-            merged.append(buf)
-            buf = dict(seg)
-    merged.append(buf)
-    result = []
-    for seg in merged:
-        result.extend(_split_long_segment(seg))
+    # 타임스탬프 인덱스: 각 단어가 몇 초에 시작하는지
+    words_with_ts = []
+    for seg in segments:
+        words = seg['orig'].strip().split()
+        if not words:
+            continue
+        dur_per_word = max(0.01, (seg['end'] - seg['start']) / len(words))
+        for i, w in enumerate(words):
+            words_with_ts.append({
+                'word':  w,
+                'start': round(seg['start'] + i * dur_per_word, 3),
+                'end':   round(seg['start'] + (i+1) * dur_per_word, 3),
+            })
+    return words_with_ts
+
+
+def gemini_sentence_split(words_with_ts):
+    """
+    Gemini에게 전체 텍스트를 주고 문장 경계 인덱스를 반환받아
+    단어 타임스탬프 기준으로 자막 세그먼트를 만듦.
+    """
+    if not words_with_ts:
+        return []
+
+    full_text = ' '.join(w['word'] for w in words_with_ts)
+
+    prompt = (
+        "You are a subtitle editor. Split the following transcript into natural subtitle segments.\n"
+        "Rules:\n"
+        "- Each segment = one complete sentence or natural spoken clause\n"
+        "- Split at sentence boundaries based on MEANING and GRAMMAR, not just punctuation\n"
+        "- Each segment should be 5-15 words ideally\n"
+        "- Return ONLY a JSON array of strings, each string being one subtitle segment\n"
+        "- Do NOT translate. Keep the original English.\n\n"
+        f"Transcript: {full_text}"
+    )
+
+    try:
+        resp     = stt_model.generate_content(prompt)
+        raw      = (resp.text or '').strip()
+        if raw.startswith('```'):
+            raw = raw.split('```')[1]
+            if raw.startswith('json'):
+                raw = raw[4:]
+            raw = raw.strip()
+        sentences = json.loads(raw)
+        if not isinstance(sentences, list):
+            raise ValueError("not a list")
+    except Exception as e:
+        print(f"[문장분리 오류] {e}", flush=True)
+        # 폴백: 문장부호 기준으로 단순 분리
+        sentences = re.split(r'(?<=[.!?])\s+', full_text)
+
+    # 각 문장을 단어 타임스탬프에 매핑
+    result   = []
+    word_idx = 0
+    total    = len(words_with_ts)
+
+    for sentence in sentences:
+        s_words = sentence.strip().split()
+        if not s_words or word_idx >= total:
+            continue
+
+        seg_start = words_with_ts[word_idx]['start']
+        end_idx   = min(word_idx + len(s_words) - 1, total - 1)
+        seg_end   = words_with_ts[end_idx]['end']
+
+        result.append({
+            'start': seg_start,
+            'end':   seg_end,
+            'orig':  sentence.strip(),
+            'trans': ''
+        })
+        word_idx += len(s_words)
+
     return result
 
 
@@ -272,8 +304,12 @@ def get_subtitles():
             segments = parse_json3(json3_file)
             safe_delete_local(json3_file)
             if segments:
-                segments     = merge_short_segments(segments)
-                translations = gemini_batch_translate([s['orig'] for s in segments])
+                # 단어 단위 타임스탬프 보존하며 합치기
+                words_with_ts = merge_all(segments)
+                # Gemini가 문맥 보고 문장 단위로 분리
+                segments      = gemini_sentence_split(words_with_ts)
+                # 번역
+                translations  = gemini_batch_translate([s['orig'] for s in segments])
                 return jsonify([
                     {'start': s['start'], 'end': s['end'], 'orig': s['orig'], 'trans': t}
                     for s, t in zip(segments, translations)
@@ -283,7 +319,7 @@ def get_subtitles():
         all_segments = transcribe_full(video_id)
         if not all_segments:
             raise RuntimeError("음성 인식 결과가 없습니다.")
-        all_segments = merge_short_segments(all_segments)
+        all_segments = gemini_sentence_split(merge_all(all_segments))
         return jsonify([
             {'start': s['start'], 'end': s['end'], 'orig': s['orig'], 'trans': s['trans']}
             for s in all_segments
